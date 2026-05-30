@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pdfplumber
+sentence-transformers
+chromadb
+anthropic
+openai
+python-dotenv
+httpx
+langchain-community>=0.3
+langchain-core>=0.3
+sqlalchemy>=2.0
