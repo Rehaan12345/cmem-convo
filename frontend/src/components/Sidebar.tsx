@@ -62,7 +62,7 @@ export default function Sidebar({
 
       <aside className={`sidebar${isOpen ? " sidebar--open" : ""}`}>
         <div className="sidebar-header">
-          <span className="sidebar-brand">council-file-convo</span>
+          <span className="sidebar-brand">cmem-convo</span>
           <div className="sidebar-header-actions">
             <button className="sidebar-new-btn" onClick={onNewChat} title="New chat" disabled={loading}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">

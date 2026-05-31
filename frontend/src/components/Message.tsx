@@ -22,10 +22,18 @@ export default function Message({ message, onFollowup }: Props) {
 
         {!isUser && message.sources && message.sources.length > 0 && (
           <div className="message-sources">
-            <span className="sources-label">Sources: </span>
-            {message.sources.map((s) => (
-              <span key={s} className="source-tag">{s}</span>
-            ))}
+            <span className="sources-label">Sources:</span>
+            {message.sources.map((s) => {
+              const isUrl = s.startsWith("http");
+              const label = isUrl ? s.split("/").pop() || s : s;
+              return isUrl ? (
+                <a key={s} href={s} target="_blank" rel="noopener noreferrer" className="source-tag source-tag--link">
+                  {label}
+                </a>
+              ) : (
+                <span key={s} className="source-tag">{s}</span>
+              );
+            })}
           </div>
         )}
 

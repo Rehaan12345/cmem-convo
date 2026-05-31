@@ -4,7 +4,11 @@ import re
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, AIMessage
 
+from logger import get_logger
+
 load_dotenv()
+
+log = get_logger(__name__)
 
 _anthropic_client = None
 _openai_client = None
@@ -26,44 +30,39 @@ def _get_openai_client():
     return _openai_client
 
 
-def _get_context(legislation_id: str) -> str:
-    """Return the stored context blurb for a legislation, falling back to a generic one."""
+def _get_context(member_id: str) -> str:
     from legislation_meta import get_meta
-    m = get_meta(legislation_id)
+    m = get_meta(member_id)
     if m and m.get("context"):
         return m["context"]
-    return f"Council File {legislation_id}."
+    return f"the legislative record of council member {member_id}."
 
-SYSTEM_PROMPT_TEMPLATE = """You are a helpful assistant for LA City {context}
 
-Your job is to help everyday residents understand this legislation in plain language — like explaining it to a neighbor, not a lawyer.
+SYSTEM_PROMPT_TEMPLATE = """You are a helpful assistant for {context}
+
+Your job is to help residents understand this councilmember's legislative record, policy positions, and actions — explained in plain language, like talking to a neighbor, not a lawyer.
 
 Rules:
 1. Base your answer ONLY on the document excerpts provided. Do not use outside knowledge.
-2. Always mention which document(s) your answer comes from — use the full source label as-is (e.g. "17-0090-S1/filename.pdf").
-3. If the excerpts come from multiple sub-files, note that so the user understands which part of the legislation each piece comes from.
+2. Always cite the source council file for each point — use the full source label as-is (e.g. "25-0381/filename.pdf").
+3. If the excerpts come from multiple council files, note which file each piece of information comes from.
 4. If the documents don't have enough to fully answer the question:
    - Say clearly: "I don't know based on these documents."
-   - Suggest which sub-file or document type might have the answer.
+   - Suggest which type of council file might have the answer.
 5. Always end your response with exactly 3 suggested follow-up questions the user could ask — questions that CAN be answered from these documents.
 
 Format your response as JSON with this exact structure:
 {{
   "answer": "your plain-language answer here",
-  "sources": ["subfolder/filename.pdf", "subfolder/filename.pdf"],
+  "sources": ["council_file_id/filename.pdf", "council_file_id/filename.pdf"],
   "followups": ["Question 1?", "Question 2?", "Question 3?"]
 }}
 
 Only return the JSON — no extra text before or after it."""
 
 
-def _system_prompt(legislations: list[str]) -> str:
-    if len(legislations) == 1:
-        context = _get_context(legislations[0])
-    else:
-        parts = [_get_context(leg) for leg in legislations]
-        ids = ", ".join(legislations)
-        context = f"Council Files {ids}. " + " | ".join(parts)
+def _system_prompt(member_ids: list[str]) -> str:
+    context = _get_context(member_ids[0]) if member_ids else "LA City Council legislation."
     return SYSTEM_PROMPT_TEMPLATE.format(context=context)
 
 
@@ -83,7 +82,6 @@ def _parse_llm_output(raw: str) -> dict:
 
 
 def _format_history_for_openai(prior_messages: list) -> str:
-    """Serialize history as a plain text preamble for OpenAI's single user message."""
     if not prior_messages:
         return ""
     lines = ["Prior conversation:"]
@@ -96,20 +94,19 @@ def _format_history_for_openai(prior_messages: list) -> str:
 def _call_claude(
     question: str,
     chunks: list[dict],
-    legislations: list[str],
+    member_ids: list[str],
     prior_messages: list | None = None,
 ) -> dict:
     import anthropic
     prior_messages = prior_messages or []
     has_history = bool(prior_messages)
-    print(f"[llm] Calling Claude (claude-haiku-4-5) for legislations {legislations}"
-          f"{f' (history: {len(prior_messages)//2} turns)' if has_history else ''}...")
+    log.info("Calling Claude (claude-haiku-4-5) for %s%s",
+             member_ids, f" (history: {len(prior_messages)//2} turns)" if has_history else "")
+
     context = _build_context(chunks)
     approx_words = len(context.split()) + len(question.split())
-    print(f"[llm] Prompt size: ~{approx_words} words"
-          f"{' (doc cache active — first turn only with history)' if has_history else ' (chunks cacheable)'}")
+    log.info("Prompt size: ~%d words", approx_words)
 
-    # Build messages list: prior turns (plain text) + current turn (with docs)
     messages = []
     for msg in prior_messages:
         role = "user" if isinstance(msg, HumanMessage) else "assistant"
@@ -136,7 +133,7 @@ def _call_claude(
         system=[
             {
                 "type": "text",
-                "text": _system_prompt(legislations),
+                "text": _system_prompt(member_ids),
                 "cache_control": {"type": "ephemeral"},
             }
         ],
@@ -145,64 +142,60 @@ def _call_claude(
     raw = response.content[0].text
     cache_read = response.usage.cache_read_input_tokens or 0
     cache_written = response.usage.cache_creation_input_tokens or 0
-    print(f"[llm] Claude responded ({len(raw)} chars). "
-          f"Tokens — input: {response.usage.input_tokens}, "
-          f"cache hit: {cache_read}, cache written: {cache_written}, "
-          f"output: {response.usage.output_tokens}")
+    log.info("Claude responded (%d chars). Tokens — input: %d, cache_hit: %d, cache_written: %d, output: %d",
+             len(raw), response.usage.input_tokens, cache_read, cache_written, response.usage.output_tokens)
+
     result = _parse_llm_output(raw)
     if not result.get("sources"):
-        print("[llm] WARNING: No sources returned in response")
+        log.warning("No sources returned in response")
     return result
 
 
 def _call_openai(
     question: str,
     chunks: list[dict],
-    legislations: list[str],
+    member_ids: list[str],
     prior_messages: list | None = None,
 ) -> dict:
     prior_messages = prior_messages or []
-    print(f"[llm] Calling OpenAI (gpt-4o-mini) for legislations {legislations}...")
+    log.info("Calling OpenAI (gpt-4o-mini) for %s", member_ids)
     context = _build_context(chunks)
     history_preamble = _format_history_for_openai(prior_messages)
     user_message = f"{history_preamble}Document excerpts:\n\n{context}\n\nQuestion: {question}"
-    print(f"[llm] Prompt size: ~{len(user_message.split())} words")
+    log.info("Prompt size: ~%d words", len(user_message.split()))
 
     client = _get_openai_client()
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": _system_prompt(legislations)},
+            {"role": "system", "content": _system_prompt(member_ids)},
             {"role": "user", "content": user_message},
         ],
         max_tokens=1024,
     )
     raw = response.choices[0].message.content
-    print(f"[llm] OpenAI responded ({len(raw)} chars). Parsing JSON...")
+    log.info("OpenAI responded (%d chars)", len(raw))
     result = _parse_llm_output(raw)
     if not result.get("sources"):
-        print("[llm] WARNING: No sources returned in response")
+        log.warning("No sources returned in response")
     return result
 
 
 def get_response(
     question: str,
     chunks: list[dict],
-    legislations: list[str],
+    member_ids: list[str],
     session_id: str | None = None,
 ) -> dict:
-    from history import load_recent, save_exchange
+    from history import load_recent
 
     prior_messages = load_recent(session_id) if session_id else []
 
     provider = os.getenv("LLM_PROVIDER", "claude").lower()
-    print(f"[llm] Provider: {provider}")
+    log.info("Provider: %s", provider)
     if provider == "openai":
-        result = _call_openai(question, chunks, legislations, prior_messages)
+        result = _call_openai(question, chunks, member_ids, prior_messages)
     else:
-        result = _call_claude(question, chunks, legislations, prior_messages)
-
-    if session_id:
-        save_exchange(session_id, question, result.get("answer", ""), legislations)
+        result = _call_claude(question, chunks, member_ids, prior_messages)
 
     return result

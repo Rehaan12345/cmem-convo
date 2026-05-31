@@ -59,6 +59,17 @@
   word-break: break-all;
 }
 
+.source-tag--link {
+  color: #1a6fbf;
+  text-decoration: none;
+  background: #eef4fb;
+}
+
+.source-tag--link:hover {
+  background: #dceaf7;
+  text-decoration: underline;
+}
+
 .message-followups {
   margin-top: 14px;
   border-top: 1px solid #f0f0f0;

@@ -10,17 +10,34 @@ from chromadb.utils import embedding_functions
 
 from llm import get_response
 from ingest import collection_name
+from logger import get_logger
+
+log = get_logger(__name__)
 
 DB_PATH = Path(os.getenv("DB_PATH", str(Path(__file__).parent / "chroma_db")))
 TOP_K = 5
 
 _collections: dict = {}
 _answer_cache: dict[str, dict] = {}
-_answer_cache_legs: dict[str, set] = {}   # legislation → set of cache keys
+_answer_cache_legs: dict[str, set] = {}
 
 _chroma_client: chromadb.PersistentClient | None = None
 _chroma_lock = threading.Lock()
 _collections_lock = threading.Lock()
+
+
+def _source_to_url(source: str) -> str:
+    """Convert 'CF-ID/filename.pdf' → cityclerk.lacity.org direct PDF URL."""
+    parts = source.split("/", 1)
+    if len(parts) != 2:
+        return source
+    cf_id, filename = parts
+    year_prefix = cf_id.split("-")[0]
+    try:
+        year = 2000 + int(year_prefix)
+    except ValueError:
+        return source
+    return f"https://cityclerk.lacity.org/onlinedocs/{year}/{filename}"
 
 
 def _cache_key(question: str, legislation: str) -> str:
@@ -43,14 +60,14 @@ def _get_collection(legislation: str):
     with _collections_lock:
         if legislation not in _collections:
             coll_name = collection_name(legislation)
-            print(f"[rag] Loading ChromaDB collection '{coll_name}' from {DB_PATH}...")
+            log.info("Loading ChromaDB collection '%s'", coll_name)
             ef = embedding_functions.SentenceTransformerEmbeddingFunction(
                 model_name="all-MiniLM-L6-v2"
             )
             _collections[legislation] = get_chroma_client().get_collection(
                 coll_name, embedding_function=ef
             )
-            print(f"[rag] Loaded '{coll_name}' ({_collections[legislation].count()} chunks)")
+            log.info("Loaded '%s' (%d chunks)", coll_name, _collections[legislation].count())
     return _collections[legislation]
 
 
@@ -58,124 +75,81 @@ def get_chunk_count(legislation: str) -> int:
     try:
         return _get_collection(legislation).count()
     except Exception as e:
-        print(f"[rag] ERROR getting chunk count for '{legislation}': {e}")
+        log.error("Error getting chunk count for '%s': %s", legislation, e)
         return 0
 
 
 def get_available_legislations() -> list[dict]:
-    """Return [{id, chunks}] for every indexed legislation, sorted by id."""
     try:
         client = get_chroma_client()
         result = []
         for col in client.list_collections():
             if col.name.startswith("leg_"):
-                # leg_17_0090 → 17-0090   leg_17_0090_S4 → 17-0090-S4
                 leg_id = col.name.removeprefix("leg_").replace("_", "-")
                 result.append({"id": leg_id, "chunks": col.count()})
         return sorted(result, key=lambda x: x["id"])
     except Exception as e:
-        print(f"[rag] ERROR listing legislations: {e}")
+        log.error("Error listing legislations: %s", e)
         return []
 
 
 def invalidate_collection_cache(legislation: str):
-    """Drop a cached collection handle so it gets reloaded after re-ingestion."""
     with _collections_lock:
         _collections.pop(legislation, None)
-    # Clear answer cache entries for this legislation
     for key in _answer_cache_legs.pop(legislation, set()):
         _answer_cache.pop(key, None)
-    print(f"[rag] Invalidated collection cache for '{legislation}'")
+    log.info("Invalidated collection cache for '%s'", legislation)
 
 
-def delete_legislation(legislation: str, docs_path: Path) -> int:
-    """
-    Remove a legislation's ChromaDB collection, clear all caches, and delete
-    its docs folder from disk.  Returns the number of chunks that were indexed.
-    """
-    from ingest import collection_name as _col_name
-
-    coll_name = _col_name(legislation)
+def delete_member_collection(member_id: str) -> int:
+    coll_name = collection_name(member_id)
     client = get_chroma_client()
-
-    # Count before deleting so we can report it
     try:
         col = client.get_collection(coll_name)
         chunk_count = col.count()
     except Exception:
         chunk_count = 0
-
-    # Delete ChromaDB collection
     try:
         client.delete_collection(coll_name)
-        print(f"[rag] Deleted ChromaDB collection '{coll_name}' ({chunk_count} chunks)")
+        log.info("Deleted ChromaDB collection '%s' (%d chunks)", coll_name, chunk_count)
     except Exception as e:
-        print(f"[rag] WARNING: could not delete collection '{coll_name}': {e}")
-
-    # Clear in-memory caches
-    invalidate_collection_cache(legislation)
-
-    # Remove docs folder from disk
-    leg_folder = docs_path / legislation
-    if leg_folder.exists():
-        import shutil
-        shutil.rmtree(leg_folder)
-        print(f"[rag] Deleted docs folder {leg_folder}")
-    else:
-        print(f"[rag] Docs folder {leg_folder} not found — skipping")
-
+        log.warning("Could not delete collection '%s': %s", coll_name, e)
+    invalidate_collection_cache(member_id)
     return chunk_count
 
 
 def answer_question(
     question: str,
     legislations: list[str],
-    branches: dict[str, list[str]] | None = None,
     session_id: str | None = None,
 ) -> dict:
-    """
-    Query one or more legislation collections, merge results by relevance,
-    and return an LLM answer grounded in the retrieved chunks.
-
-    `branches` maps legislation_id → list of branch subfolder names to filter to
-    (empty list or missing key = no filter = all branches).
-    """
-    branches = branches or {}
     leg_ids = sorted(legislations)
-    branch_key = "|".join(f"{l}:{','.join(sorted(branches.get(l, [])))}" for l in leg_ids)
-    print(f"[rag] Query for legislations {leg_ids}: '{question}'" +
-          (f" [branches: {branches}]" if branches else ""))
+    log.info("Query for %s: '%s'", leg_ids, question)
 
-    # App-level cache — skip when the session has history (each turn has unique context)
-    key = _cache_key(question + "|legs:" + ",".join(leg_ids) + "|branches:" + branch_key,
-                     "__multi__")
+    key = _cache_key(question + "|legs:" + ",".join(leg_ids), "__multi__")
     use_cache = not session_id
     if not use_cache and session_id:
         from history import load_recent
-        use_cache = len(load_recent(session_id)) == 0  # cache only on first turn
+        use_cache = len(load_recent(session_id)) == 0
 
     if use_cache and key in _answer_cache:
-        print(f"[rag] Cache HIT — returning stored answer (0 tokens used)")
+        log.info("Cache HIT — returning stored answer")
         return _answer_cache[key]
 
-    print(f"[rag] Cache MISS — querying {len(leg_ids)} collection(s), top {TOP_K} each...")
+    log.info("Cache MISS — querying %d collection(s), top %d each", len(leg_ids), TOP_K)
 
-    # Query each collection and collect (distance, doc, metadata) tuples
     all_results: list[tuple[float, str, dict]] = []
     for leg in leg_ids:
         try:
             collection = _get_collection(leg)
         except Exception as e:
-            print(f"[rag] WARNING: could not load collection for '{leg}': {e}")
+            log.warning("Could not load collection for '%s': %s", leg, e)
             continue
 
-        leg_branches = branches.get(leg)
-        where = {"subfolder": {"$in": leg_branches}} if leg_branches else None
         res = collection.query(
             query_texts=[question],
             n_results=TOP_K,
             include=["documents", "metadatas", "distances"],
-            **({"where": where} if where else {}),
         )
         if res["documents"] and res["documents"][0]:
             for doc, meta, dist in zip(
@@ -183,24 +157,29 @@ def answer_question(
             ):
                 all_results.append((dist, doc, meta))
 
-    # Sort globally by distance (lower = more relevant), keep top TOP_K per leg
     all_results.sort(key=lambda x: x[0])
     top = all_results[: TOP_K * len(leg_ids)]
 
     chunks = [{"text": doc, "source": meta.get("source", "unknown")}
               for _, doc, meta in top]
 
-    print(f"[rag] Retrieved {len(chunks)} chunks total:")
+    log.info("Retrieved %d chunks total", len(chunks))
     for i, c in enumerate(chunks):
-        print(f"  [{i+1}] {c['source']} — {len(c['text'].split())} words")
+        log.info("  [%d] %s — %d words", i + 1, c["source"], len(c["text"].split()))
 
-    print(f"[rag] Sending to LLM...")
     result = get_response(question, chunks, leg_ids, session_id=session_id)
+    result["sources"] = [_source_to_url(s) for s in result.get("sources", [])]
+
+    if session_id:
+        from history import save_exchange
+        save_exchange(session_id, question, result.get("answer", ""),
+                      sources=result.get("sources", []),
+                      followups=result.get("followups", []),
+                      member_id=leg_ids[0] if leg_ids else None)
 
     if use_cache:
         _answer_cache[key] = result
-    if use_cache:
         for leg in leg_ids:
             _answer_cache_legs.setdefault(leg, set()).add(key)
-    print(f"[rag] Answer stored in cache (cache size: {len(_answer_cache)} entries)")
+        log.info("Answer cached (cache size: %d)", len(_answer_cache))
     return result
