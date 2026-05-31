@@ -1,0 +1,17 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      # Point all persistent data to /app/data so a single volume covers everything
+      - DB_PATH=/app/data/chroma_db
+      - HISTORY_DB_PATH=/app/data/chat_history.db
+      - META_PATH=/app/data/legislation_meta.json
+    volumes:
+      - app_data:/app/data
+
+volumes:
+  app_data:
