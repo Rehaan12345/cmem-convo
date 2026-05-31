@@ -1,0 +1,6 @@
+frontend/
+.claude/
+.git/
+*.md
+railway.toml
+docker-compose.yml
