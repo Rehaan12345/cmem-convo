@@ -4,3 +4,12 @@ frontend/
 *.md
 railway.toml
 docker-compose.yml
+backend/chroma_db/
+backend/chat_history.db
+backend/chat_history.db-shm
+backend/chat_history.db-wal
+backend/legislation_meta.json
+backend/*.log
+backend/__pycache__/
+backend/*.pyc
+backend/.venv/
