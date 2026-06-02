@@ -11,19 +11,33 @@ from logger import get_logger
 
 log = get_logger(__name__)
 
-_DB_PATH = Path(os.getenv("HISTORY_DB_PATH", str(Path(__file__).parent / "chat_history.db")))
 HISTORY_WINDOW = 5
 
-_engine = create_engine(
-    f"sqlite:///{_DB_PATH}",
-    connect_args={"check_same_thread": False, "timeout": 30},
-)
+_DATABASE_URL = os.getenv("DATABASE_URL")
+_DB_PATH = Path(os.getenv("HISTORY_DB_PATH", str(Path(__file__).parent / "chat_history.db")))
+
+if _DATABASE_URL:
+    # Railway sets postgres:// — SQLAlchemy needs postgresql://
+    if _DATABASE_URL.startswith("postgres://"):
+        _DATABASE_URL = _DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    _engine = create_engine(_DATABASE_URL, pool_pre_ping=True)
+    log.info("Using PostgreSQL for history/registry")
+else:
+    _engine = create_engine(
+        f"sqlite:///{_DB_PATH}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+    log.info("Using SQLite for history/registry at %s", _DB_PATH)
+
+# expose for member_registry
+engine = _engine
 
 
 @event.listens_for(_engine, "connect")
-def _set_wal(dbapi_conn, _):
-    dbapi_conn.execute("PRAGMA journal_mode=WAL")
-    dbapi_conn.execute("PRAGMA busy_timeout=30000")
+def _set_sqlite_pragmas(dbapi_conn, _):
+    if _engine.dialect.name == "sqlite":
+        dbapi_conn.execute("PRAGMA journal_mode=WAL")
+        dbapi_conn.execute("PRAGMA busy_timeout=30000")
 
 
 def _ensure_tables():
@@ -56,7 +70,7 @@ def _ensure_tables():
             )
         """))
         conn.commit()
-    log.info("Database tables ready at %s", _DB_PATH)
+    log.info("Database tables ready")
 
 
 _ensure_tables()
@@ -85,17 +99,19 @@ def save_exchange(
     with _engine.connect() as conn:
         conn.execute(
             text(
-                "INSERT OR IGNORE INTO sessions (session_id, title, legislation_ids, created_at) "
-                "VALUES (:sid, :title, :legs, :ts)"
+                "INSERT INTO sessions (session_id, title, legislation_ids, created_at) "
+                "VALUES (:sid, :title, :legs, :ts) ON CONFLICT (session_id) DO NOTHING"
             ),
             {"sid": session_id, "title": question[:120],
              "legs": json.dumps([member_id] if member_id else []), "ts": time.time()},
         )
         conn.execute(
             text(
-                "INSERT OR REPLACE INTO message_sources "
+                "INSERT INTO message_sources "
                 "(session_id, exchange_index, sources_json, followups_json) "
-                "VALUES (:sid, :idx, :src, :fup)"
+                "VALUES (:sid, :idx, :src, :fup) "
+                "ON CONFLICT (session_id, exchange_index) DO UPDATE SET "
+                "sources_json = EXCLUDED.sources_json, followups_json = EXCLUDED.followups_json"
             ),
             {"sid": session_id, "idx": exchange_index,
              "src": json.dumps(sources or []), "fup": json.dumps(followups or [])},
