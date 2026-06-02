@@ -17,6 +17,7 @@ API_URL = "https://cmem-convo-production.up.railway.app"
 PDF_DIR = Path("/Users/rehaananjaria/Visic/CmemFilesReports/Raw")
 POLL_INTERVAL = 20  # seconds between status checks
 POLL_TIMEOUT  = 90  # seconds to wait for a single status HTTP response
+MAX_RESUMES   = 5   # times to re-trigger a seed after a lost job (OOM restart)
 
 MEMBERS = {
     "cd1":  ("Eunisses Hernandez",      "Council District 1"),
@@ -37,8 +38,28 @@ MEMBERS = {
 }
 
 
+def trigger_resume(member_id: str) -> bool:
+    """Re-trigger indexing via /reseed after a job was lost (OOM restart).
+    Reseed reads the file list from the registry and, since the collection is
+    no longer wiped server-side, resumes from the already-indexed files.
+    Returns True if a job is running again (newly started or already in flight)."""
+    try:
+        resp = requests.post(f"{API_URL}/api/members/{member_id}/reseed", timeout=120)
+    except requests.RequestException as e:
+        print(f"\n  Resume request failed: {e}")
+        return False
+    if resp.status_code == 409:
+        return True  # a job is already running again — just keep polling
+    if resp.status_code not in (200, 201):
+        print(f"\n  Resume failed: {resp.status_code} {resp.text}")
+        return False
+    print(f"\n  Resumed via reseed (job {resp.json().get('job_id')})")
+    return True
+
+
 def poll_until_done(member_id: str) -> bool:
     print(f"  Waiting for indexing", end="", flush=True)
+    resumes = 0
     while True:
         try:
             resp = requests.get(
@@ -49,9 +70,23 @@ def poll_until_done(member_id: str) -> bool:
             time.sleep(POLL_INTERVAL)
             continue
 
+        if resp.status_code == 404:
+            # Job state lost — container restarted (likely OOM). Resume via reseed.
+            if resumes >= MAX_RESUMES:
+                print(f"\n  Gave up after {MAX_RESUMES} resume attempts")
+                return False
+            resumes += 1
+            print(f"\n  No job found (container restarted?) — resuming [{resumes}/{MAX_RESUMES}]")
+            if not trigger_resume(member_id):
+                return False
+            time.sleep(POLL_INTERVAL)
+            continue
+
         if resp.status_code != 200:
-            print(f"\n  Status check failed: {resp.status_code}")
-            return False
+            # Transient during restart (502/503) — wait for the container to recover.
+            print(f"\n  Status check returned {resp.status_code} (retrying)")
+            time.sleep(POLL_INTERVAL)
+            continue
 
         data = resp.json()
         status = data.get("status", "")

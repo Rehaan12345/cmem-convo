@@ -85,18 +85,13 @@ async def _run_indexing(
     ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
     client = rag.get_chroma_client()
     coll_name = collection_name(member_id)
-    try:
-        client.delete_collection(coll_name)
-        seed_log.info("Wiped existing collection '%s'", coll_name)
-    except Exception:
-        pass
-    collection = client.create_collection(coll_name, embedding_function=ef)
-    seed_log.info("Created collection '%s'", coll_name)
+    collection = client.get_or_create_collection(coll_name, embedding_function=ef)
+    seed_log.info("Using collection '%s' (%d existing chunks)", coll_name, collection.count())
 
     completed = 0
     total_chunks = 0
     failed: list[str] = []
-    sem = asyncio.Semaphore(6)
+    sem = asyncio.Semaphore(2)
 
     job["status"] = "indexing"
     job["message"] = f"Indexing 0/{total} council files..."
@@ -136,7 +131,9 @@ async def _run_indexing(
         completed += 1
         job["message"] = f"Indexing {completed}/{total} council files..."
 
-    await asyncio.gather(*[process_one(fid) for fid in file_ids])
+    BATCH_SIZE = 10
+    for i in range(0, len(file_ids), BATCH_SIZE):
+        await asyncio.gather(*[process_one(fid) for fid in file_ids[i:i + BATCH_SIZE]])
 
     if failed:
         seed_log.warning("%d files failed: %s", len(failed), failed)
