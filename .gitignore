@@ -21,7 +21,10 @@ backend/chroma_db/
 
 # Runtime data files
 backend/chat_history.db
+backend/chat_history.db-shm
+backend/chat_history.db-wal
 backend/legislation_meta.json
+backend/seed_cd*.log
 
 # Node
 frontend/node_modules/
@@ -30,6 +33,7 @@ frontend/.vite/
 
 # Claude Code
 .claude/settings.local.json
+.claude/agent-memory/
 
 # macOS
 .DS_Store
