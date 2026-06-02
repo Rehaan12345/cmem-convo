@@ -13,7 +13,7 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 
 COPY backend/ .
 
-RUN mkdir -p /data
+RUN mkdir -p data
 
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
