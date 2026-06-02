@@ -122,6 +122,7 @@ def answer_question(
     question: str,
     legislations: list[str],
     session_id: str | None = None,
+    client_id: str | None = None,
 ) -> dict:
     leg_ids = sorted(legislations)
     log.info("Query for %s: '%s'", leg_ids, question)
@@ -175,7 +176,8 @@ def answer_question(
         save_exchange(session_id, question, result.get("answer", ""),
                       sources=result.get("sources", []),
                       followups=result.get("followups", []),
-                      member_id=leg_ids[0] if leg_ids else None)
+                      member_id=leg_ids[0] if leg_ids else None,
+                      client_id=client_id)
 
     if use_cache:
         _answer_cache[key] = result

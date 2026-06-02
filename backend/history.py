@@ -47,7 +47,8 @@ def _ensure_tables():
                 session_id      TEXT PRIMARY KEY,
                 title           TEXT,
                 legislation_ids TEXT NOT NULL DEFAULT '[]',
-                created_at      REAL NOT NULL
+                created_at      REAL NOT NULL,
+                client_id       TEXT
             )
         """))
         conn.execute(text("""
@@ -69,6 +70,14 @@ def _ensure_tables():
                 PRIMARY KEY (session_id, exchange_index)
             )
         """))
+        # Add client_id column if upgrading from an older schema
+        try:
+            conn.execute(text("ALTER TABLE sessions ADD COLUMN client_id TEXT"))
+            conn.commit()
+            log.info("Migrated sessions table: added client_id column")
+        except Exception:
+            conn.rollback()  # column already exists
+
         conn.commit()
     log.info("Database tables ready")
 
@@ -91,6 +100,7 @@ def save_exchange(
     sources: list[str] | None = None,
     followups: list[str] | None = None,
     member_id: str | None = None,
+    client_id: str | None = None,
 ) -> None:
     h = get_history(session_id)
     exchange_index = len(h.messages) // 2
@@ -99,11 +109,12 @@ def save_exchange(
     with _engine.connect() as conn:
         conn.execute(
             text(
-                "INSERT INTO sessions (session_id, title, legislation_ids, created_at) "
-                "VALUES (:sid, :title, :legs, :ts) ON CONFLICT (session_id) DO NOTHING"
+                "INSERT INTO sessions (session_id, title, legislation_ids, created_at, client_id) "
+                "VALUES (:sid, :title, :legs, :ts, :cid) ON CONFLICT (session_id) DO NOTHING"
             ),
             {"sid": session_id, "title": question[:120],
-             "legs": json.dumps([member_id] if member_id else []), "ts": time.time()},
+             "legs": json.dumps([member_id] if member_id else []), "ts": time.time(),
+             "cid": client_id},
         )
         conn.execute(
             text(
@@ -120,14 +131,23 @@ def save_exchange(
     log.info("Saved exchange for session %s (member=%s)", session_id, member_id)
 
 
-def list_sessions() -> list[dict]:
+def list_sessions(client_id: str | None = None) -> list[dict]:
     with _engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT session_id, title, legislation_ids, created_at "
-                "FROM sessions ORDER BY created_at DESC"
-            )
-        ).fetchall()
+        if client_id:
+            rows = conn.execute(
+                text(
+                    "SELECT session_id, title, legislation_ids, created_at "
+                    "FROM sessions WHERE client_id = :cid ORDER BY created_at DESC"
+                ),
+                {"cid": client_id},
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                text(
+                    "SELECT session_id, title, legislation_ids, created_at "
+                    "FROM sessions ORDER BY created_at DESC"
+                )
+            ).fetchall()
     return [
         {
             "session_id": r[0],

@@ -48,6 +48,7 @@ class ChatRequest(BaseModel):
     question: str
     member_id: str
     session_id: str | None = None
+    client_id: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -347,7 +348,8 @@ def chat(req: ChatRequest):
             detail=f"Member '{member_id}' is not yet indexed. Please seed it first.",
         )
 
-    result = rag.answer_question(question, [member_id], session_id=req.session_id or None)
+    result = rag.answer_question(question, [member_id], session_id=req.session_id or None,
+                                 client_id=req.client_id or None)
     log.info("Chat response: %d chars, %d sources, %d followups",
              len(result.get("answer", "")), len(result.get("sources", [])),
              len(result.get("followups", [])))
@@ -359,9 +361,9 @@ def chat(req: ChatRequest):
 
 
 @app.get("/api/sessions")
-def list_sessions_endpoint():
+def list_sessions_endpoint(client_id: str | None = None):
     from history import list_sessions
-    return list_sessions()
+    return list_sessions(client_id=client_id)
 
 
 @app.get("/api/sessions/{session_id}/messages")

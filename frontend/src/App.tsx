@@ -23,6 +23,13 @@ export default function App() {
   const [messages, setMessages] = useState<MessageData[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [clientId] = useState<string>(() => {
+    const stored = localStorage.getItem("cmem_client_id");
+    if (stored) return stored;
+    const id = crypto.randomUUID();
+    localStorage.setItem("cmem_client_id", id);
+    return id;
+  });
   const [sessionId, setSessionId] = useState<string>(() => crypto.randomUUID());
 
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -34,11 +41,11 @@ export default function App() {
 
   const fetchSessions = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/api/sessions`);
+      const res = await fetch(`${API_URL}/api/sessions?client_id=${clientId}`);
       if (!res.ok) return;
       setSessions(await res.json());
     } catch { /* silent */ }
-  }, []);
+  }, [clientId]);
 
   const fetchMembers = useCallback(async () => {
     try {
@@ -87,6 +94,7 @@ export default function App() {
           question,
           member_id: activeMember.id,
           session_id: sessionId,
+          client_id: clientId,
         }),
       });
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
