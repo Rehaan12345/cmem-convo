@@ -50,6 +50,7 @@ Rules:
    - Say clearly: "I don't know based on these documents."
    - Suggest which type of council file might have the answer.
 5. Always end your response with exactly 3 suggested follow-up questions the user could ask — questions that CAN be answered from these documents.
+6. Keep the answer concise. Default to 2 short paragraphs. Only when the user's question is broad or detailed may you use up to 3 paragraphs — never more than 3.
 
 Format your response as JSON with this exact structure:
 {{
@@ -77,7 +78,12 @@ def _parse_llm_output(raw: str) -> dict:
     raw = re.sub(r"\s*```$", "", raw)
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        log.warning(
+            "Failed to parse LLM output as JSON (%s); falling back to raw text — "
+            "followups will be empty and may appear inline. Raw length: %d chars. Preview: %r",
+            e, len(raw), raw[:300],
+        )
         return {"answer": raw, "sources": [], "followups": []}
 
 
