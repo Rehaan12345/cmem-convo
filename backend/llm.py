@@ -182,7 +182,7 @@ def _call_openai(
     raw = response.choices[0].message.content
     log.info("OpenAI responded (%d chars)", len(raw))
     result = _parse_llm_output(raw)
-    if not result.get("sources"):
+    if not result.get("sources"): 
         log.warning("No sources returned in response")
     return result
 
