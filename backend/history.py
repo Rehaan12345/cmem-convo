@@ -70,6 +70,10 @@ def _ensure_tables():
                 PRIMARY KEY (session_id, exchange_index)
             )
         """))
+        # Commit table creation before the migration below: on Postgres all DDL
+        # is transactional, so a rollback of the (often-failing) ALTER would
+        # otherwise also discard these CREATE TABLE statements.
+        conn.commit()
         # Add client_id column if upgrading from an older schema
         try:
             conn.execute(text("ALTER TABLE sessions ADD COLUMN client_id TEXT"))
