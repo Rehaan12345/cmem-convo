@@ -5,7 +5,7 @@ import re
 import uuid
 
 import pdfplumber
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -267,6 +267,7 @@ def get_member(member_id: str):
 @limiter.limit("3/hour")
 async def create_member(
     request: Request,
+    response: Response,
     background_tasks: BackgroundTasks,
     member_id: str = Form(...),
     name: str = Form(...),
@@ -322,7 +323,7 @@ def delete_member(member_id: str):
 
 @app.post("/api/members/{member_id}/reseed", response_model=MemberSeedStarted)
 @limiter.limit("3/hour")
-async def reseed_member(request: Request, member_id: str, background_tasks: BackgroundTasks):
+async def reseed_member(request: Request, response: Response, member_id: str, background_tasks: BackgroundTasks):
     """Re-index a member using the council file IDs already stored in the registry.
     Does not require re-uploading the original PDF."""
     member = member_registry.get_member(member_id)
@@ -352,7 +353,7 @@ async def reseed_member(request: Request, member_id: str, background_tasks: Back
 @app.post("/api/chat", response_model=ChatResponse)
 @limiter.limit("20/minute")
 @limiter.limit("300/day")
-def chat(request: Request, req: ChatRequest):
+def chat(request: Request, response: Response, req: ChatRequest):
     question = req.question.strip()
     member_id = req.member_id.strip()
 
