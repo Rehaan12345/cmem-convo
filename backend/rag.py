@@ -169,7 +169,8 @@ def answer_question(
         from history import load_recent
         prior_messages = load_recent(session_id)
 
-    key = _cache_key(question + "|legs:" + ",".join(leg_ids), "__multi__")
+    provider = os.getenv("LLM_PROVIDER", "claude").lower()
+    key = _cache_key(question + "|legs:" + ",".join(leg_ids) + "|p:" + provider, "__multi__")
     use_cache = not prior_messages
 
     if use_cache and key in _answer_cache:

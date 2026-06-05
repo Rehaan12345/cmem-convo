@@ -5,11 +5,13 @@ import re
 import uuid
 
 import pdfplumber
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from chromadb.utils import embedding_functions
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 import rag
 import member_registry
@@ -27,6 +29,20 @@ _CF_RE = re.compile(r"\b(\d{2}-\d{4}(?:-S\d+)?)\b")
 
 
 app = FastAPI(title="Council Member Chat API")
+
+
+def client_ip(request: Request) -> str:
+    """Real client IP for rate limiting. Railway sits in front as a single
+    trusted proxy, so the first X-Forwarded-For entry is the client."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+limiter = Limiter(key_func=client_ip, default_limits=["120/minute"], headers_enabled=True)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
@@ -213,6 +229,7 @@ async def _run_member_reseed(job_id: str, member_id: str):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
+@limiter.exempt
 def health():
     legislations = rag.get_available_legislations()
     log.info("Health check — %d collections available", len(legislations))
@@ -247,7 +264,10 @@ def get_member(member_id: str):
 
 
 @app.post("/api/members", response_model=MemberSeedStarted)
+@limiter.limit("3/hour")
 async def create_member(
+    request: Request,
+    response: Response,
     background_tasks: BackgroundTasks,
     member_id: str = Form(...),
     name: str = Form(...),
@@ -302,7 +322,8 @@ def delete_member(member_id: str):
 
 
 @app.post("/api/members/{member_id}/reseed", response_model=MemberSeedStarted)
-async def reseed_member(member_id: str, background_tasks: BackgroundTasks):
+@limiter.limit("3/hour")
+async def reseed_member(request: Request, response: Response, member_id: str, background_tasks: BackgroundTasks):
     """Re-index a member using the council file IDs already stored in the registry.
     Does not require re-uploading the original PDF."""
     member = member_registry.get_member(member_id)
@@ -330,7 +351,9 @@ async def reseed_member(member_id: str, background_tasks: BackgroundTasks):
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+@limiter.limit("20/minute")
+@limiter.limit("300/day")
+def chat(request: Request, response: Response, req: ChatRequest):
     question = req.question.strip()
     member_id = req.member_id.strip()
 
