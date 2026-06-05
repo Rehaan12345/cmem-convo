@@ -135,7 +135,7 @@ export default function App() {
       const res = await fetch(`${API_URL}/api/sessions/${session.session_id}/messages`);
       if (!res.ok) return;
       const data = await res.json();
-      const loaded: MessageData[] = data.messages.map((m: { role: string; content: string; sources?: string[]; followups?: string[] }) => ({
+      const loaded: MessageData[] = data.messages.map((m: { role: string; content: string; sources?: MessageData["sources"]; followups?: string[] }) => ({
         role: m.role as "user" | "assistant",
         text: m.content,
         sources: m.sources,

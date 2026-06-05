@@ -51,9 +51,14 @@ class ChatRequest(BaseModel):
     client_id: str | None = None
 
 
+class Source(BaseModel):
+    title: str
+    url: str
+
+
 class ChatResponse(BaseModel):
     answer: str
-    sources: list[str]
+    sources: list[Source]
     followups: list[str]
 
 

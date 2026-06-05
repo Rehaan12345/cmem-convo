@@ -1,9 +1,12 @@
+import ReactMarkdown from "react-markdown";
 import "./Message.css";
+
+type SourceRef = { title: string; url: string } | string;
 
 interface MessageData {
   role: "user" | "assistant";
   text: string;
-  sources?: string[];
+  sources?: SourceRef[];
   followups?: string[];
 }
 
@@ -18,20 +21,39 @@ export default function Message({ message, onFollowup }: Props) {
   return (
     <div className={`message ${isUser ? "message--user" : "message--assistant"}`}>
       <div className="message-bubble">
-        <p className="message-text">{message.text}</p>
+        {isUser ? (
+          <p className="message-text">{message.text}</p>
+        ) : (
+          <div className="message-text">
+            <ReactMarkdown
+              components={{
+                a: (props) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+              }}
+            >
+              {message.text}
+            </ReactMarkdown>
+          </div>
+        )}
 
         {!isUser && message.sources && message.sources.length > 0 && (
           <div className="message-sources">
             <span className="sources-label">Sources:</span>
             {message.sources.map((s) => {
-              const isUrl = s.startsWith("http");
-              const label = isUrl ? s.split("/").pop() || s : s;
-              return isUrl ? (
-                <a key={s} href={s} target="_blank" rel="noopener noreferrer" className="source-tag source-tag--link">
-                  {label}
+              if (typeof s === "string") {
+                const isUrl = s.startsWith("http");
+                const label = isUrl ? s.split("/").pop() || s : s;
+                return isUrl ? (
+                  <a key={s} href={s} target="_blank" rel="noopener noreferrer" className="source-tag source-tag--link">
+                    {label}
+                  </a>
+                ) : (
+                  <span key={s} className="source-tag">{s}</span>
+                );
+              }
+              return (
+                <a key={s.url} href={s.url} target="_blank" rel="noopener noreferrer" className="source-tag source-tag--link">
+                  {s.title}
                 </a>
-              ) : (
-                <span key={s} className="source-tag">{s}</span>
               );
             })}
           </div>
