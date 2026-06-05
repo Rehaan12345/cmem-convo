@@ -20,6 +20,9 @@ TOP_K = 5
 _collections: dict = {}
 _answer_cache: dict[str, dict] = {}
 _answer_cache_legs: dict[str, set] = {}
+# Most recent retrieved chunks per session, carried into follow-up turns so a
+# question about the prior answer keeps that answer's grounding in context.
+_session_chunks: dict[str, list[dict]] = {}
 
 _chroma_client: chromadb.PersistentClient | None = None
 _chroma_lock = threading.Lock()
@@ -38,6 +41,18 @@ def _source_to_url(source: str) -> str:
     except ValueError:
         return source
     return f"https://cityclerk.lacity.org/onlinedocs/{year}/{filename}"
+
+
+def _dedup_chunks(chunks: list[dict]) -> list[dict]:
+    """Drop duplicate chunks (same source + text), preserving order."""
+    seen = set()
+    out = []
+    for c in chunks:
+        k = (c["source"], c["text"])
+        if k not in seen:
+            seen.add(k)
+            out.append(c)
+    return out
 
 
 def _cache_key(question: str, legislation: str) -> str:
@@ -127,15 +142,24 @@ def answer_question(
     leg_ids = sorted(legislations)
     log.info("Query for %s: '%s'", leg_ids, question)
 
-    key = _cache_key(question + "|legs:" + ",".join(leg_ids), "__multi__")
-    use_cache = not session_id
-    if not use_cache and session_id:
+    prior_messages = []
+    if session_id:
         from history import load_recent
-        use_cache = len(load_recent(session_id)) == 0
+        prior_messages = load_recent(session_id)
+
+    key = _cache_key(question + "|legs:" + ",".join(leg_ids), "__multi__")
+    use_cache = not prior_messages
 
     if use_cache and key in _answer_cache:
         log.info("Cache HIT — returning stored answer")
         return _answer_cache[key]
+
+    # On a follow-up, rewrite the question into a standalone query so retrieval
+    # stays on-topic ("what documents is this from?" -> the prior answer's topic).
+    search_query = question
+    if prior_messages:
+        from llm import contextualize_question
+        search_query = contextualize_question(question, prior_messages)
 
     log.info("Cache MISS — querying %d collection(s), top %d each", len(leg_ids), TOP_K)
 
@@ -148,7 +172,7 @@ def answer_question(
             continue
 
         res = collection.query(
-            query_texts=[question],
+            query_texts=[search_query],
             n_results=TOP_K,
             include=["documents", "metadatas", "distances"],
         )
@@ -167,6 +191,14 @@ def answer_question(
     log.info("Retrieved %d chunks total", len(chunks))
     for i, c in enumerate(chunks):
         log.info("  [%d] %s — %d words", i + 1, c["source"], len(c["text"].split()))
+
+    # Carry the prior turn's chunks forward so follow-ups keep their grounding,
+    # then store this turn's context (bounded) for the next follow-up.
+    if session_id:
+        carried = _session_chunks.get(session_id, [])
+        chunks = _dedup_chunks(chunks + carried)[: TOP_K * len(leg_ids) + TOP_K]
+        _session_chunks[session_id] = chunks
+        log.info("Context after carry-forward: %d chunks", len(chunks))
 
     result = get_response(question, chunks, leg_ids, session_id=session_id)
     result["sources"] = [_source_to_url(s) for s in result.get("sources", [])]

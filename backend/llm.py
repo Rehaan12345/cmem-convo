@@ -187,6 +187,58 @@ def _call_openai(
     return result
 
 
+def contextualize_question(question: str, prior_messages: list) -> str:
+    """Rewrite a follow-up into a standalone retrieval query using chat history.
+
+    Follow-ups like "say more" or "what documents is this from?" carry no topic
+    on their own, so embedding them retrieves irrelevant chunks. Rewriting them
+    against the conversation restores the topic. Returns the original question if
+    there's no history or on any error (so retrieval still proceeds)."""
+    if not prior_messages:
+        return question
+
+    history_lines = []
+    for msg in prior_messages:
+        role = "User" if isinstance(msg, HumanMessage) else "Assistant"
+        history_lines.append(f"{role}: {msg.content}")
+    user_text = (
+        "Conversation so far:\n" + "\n".join(history_lines) + "\n\n"
+        f"Follow-up message: {question}\n\n"
+        "Rewrite the follow-up as a standalone search query for retrieving "
+        "documents. Resolve pronouns and references using the conversation. If "
+        "the follow-up asks about sources or the previous answer, target the "
+        "topic of that previous answer. Return ONLY the query text."
+    )
+
+    provider = os.getenv("LLM_PROVIDER", "claude").lower()
+    try:
+        if provider == "openai":
+            client = _get_openai_client()
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": user_text}],
+                max_tokens=128,
+            )
+            rewritten = resp.choices[0].message.content
+        else:
+            client = _get_anthropic_client()
+            resp = client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=128,
+                messages=[{"role": "user", "content": user_text}],
+            )
+            rewritten = resp.content[0].text
+    except Exception as e:
+        log.warning("Query contextualization failed (%s); using original question", e)
+        return question
+
+    rewritten = (rewritten or "").strip().strip('"')
+    if not rewritten:
+        return question
+    log.info("Contextualized query: %r -> %r", question, rewritten)
+    return rewritten
+
+
 def get_response(
     question: str,
     chunks: list[dict],
