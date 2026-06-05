@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import os
-import threading 
+import re
+import threading
 from pathlib import Path
 
 import chromadb
@@ -41,6 +42,27 @@ def _source_to_url(source: str) -> str:
     except ValueError:
         return source
     return f"https://cityclerk.lacity.org/onlinedocs/{year}/{filename}"
+
+
+_MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_SOURCE_LABEL = re.compile(r"^\d{2}-\d{4}/\S+\.pdf$")
+
+
+def _rewrite_answer_links(answer: str, label_to_url: dict[str, str]) -> str:
+    """Rewrite markdown link hrefs from source labels to real PDF URLs.
+
+    Hrefs in label_to_url are replaced directly. Hrefs that look like source
+    labels but aren't in the map fall back to _source_to_url. Hrefs that don't
+    match the source-label pattern at all (malformed output from the model) are
+    stripped — the link becomes plain text so nothing broken reaches the UI."""
+    def repl(m: re.Match) -> str:
+        text, href = m.group(1), m.group(2)
+        if href in label_to_url:
+            return f"[{text}]({label_to_url[href]})"
+        if _SOURCE_LABEL.match(href):
+            return f"[{text}]({_source_to_url(href)})"
+        return text  # malformed href — keep the visible text, drop the bad link
+    return _MD_LINK.sub(repl, answer)
 
 
 def _dedup_chunks(chunks: list[dict]) -> list[dict]:
@@ -201,7 +223,24 @@ def answer_question(
         log.info("Context after carry-forward: %d chunks", len(chunks))
 
     result = get_response(question, chunks, leg_ids, session_id=session_id)
-    result["sources"] = [_source_to_url(s) for s in result.get("sources", [])]
+
+    # Normalize sources to {title, url} objects and rewrite the answer's inline
+    # link hrefs (source labels) to real URLs. Tolerate bare-string sources from
+    # legacy output or the JSON parse fallback.
+    label_to_url: dict[str, str] = {}
+    normalized: list[dict] = []
+    for s in result.get("sources", []):
+        if isinstance(s, dict):
+            label = s.get("source", "")
+            title = s.get("title") or label.split("/")[-1]
+        else:
+            label = s
+            title = label.split("/")[-1]
+        url = _source_to_url(label)
+        label_to_url[label] = url
+        normalized.append({"title": title, "url": url})
+    result["sources"] = normalized
+    result["answer"] = _rewrite_answer_links(result.get("answer", ""), label_to_url)
 
     if session_id:
         from history import save_exchange

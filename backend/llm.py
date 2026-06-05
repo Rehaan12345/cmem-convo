@@ -44,8 +44,8 @@ Your job is to help residents understand this councilmember's legislative record
 
 Rules:
 1. Base your answer ONLY on the document excerpts provided. Do not use outside knowledge.
-2. Always cite the source council file for each point — use the full source label as-is (e.g. "25-0381/filename.pdf").
-3. If the excerpts come from multiple council files, note which file each piece of information comes from.
+2. Cite each point inline as a markdown link with this exact format: [Short Title](source_label) — for example [Food Resources Motion](25-0381/filename.pdf). The link text must be a 2-4 word Title-Case description of the document's topic. The href must be ONLY the source label (e.g. "25-0381/filename.pdf") — no dollar amounts, no extra words, no spaces. Never put anything other than the source label in the href.
+3. If the excerpts come from multiple council files, cite each piece of information with its own inline link.
 4. If the documents don't have enough to fully answer the question:
    - Say clearly: "I don't know based on these documents."
    - Suggest which type of council file might have the answer.
@@ -54,12 +54,12 @@ Rules:
 
 Format your response as JSON with this exact structure:
 {{
-  "answer": "your plain-language answer here",
-  "sources": ["council_file_id/filename.pdf", "council_file_id/filename.pdf"],
+  "answer": "your plain-language answer here, with inline [2-4 word title](council_file_id/filename.pdf) links",
+  "sources": [{{"title": "Food Resources Motion", "source": "council_file_id/filename.pdf"}}],
   "followups": ["Question 1?", "Question 2?", "Question 3?"]
 }}
 
-Only return the JSON — no extra text before or after it."""
+Each source's "title" must match the inline link text used for that document and stay 2-4 words reflecting its topic. Only return the JSON — no extra text before or after it."""
 
 
 def _system_prompt(member_ids: list[str]) -> str:
