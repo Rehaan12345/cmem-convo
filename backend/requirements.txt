@@ -2,6 +2,7 @@ fastapi
 slowapi
 uvicorn[standard]
 pdfplumber
+beautifulsoup4
 sentence-transformers
 chromadb
 anthropic

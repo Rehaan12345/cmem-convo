@@ -14,6 +14,7 @@ interface Member {
   district: string;
   indexed: boolean;
   starters?: string[];
+  topic_starters?: Record<string, string[]>;
   subtitle?: string;
 }
 
@@ -81,7 +82,7 @@ export default function App() {
     setSessionId(crypto.randomUUID());
   }
 
-  async function sendQuestion(question: string) {
+  async function sendQuestion(question: string, fromStarter = false, topic?: string) {
     if (!question.trim() || loading || !activeMember) return;
     setMessages((prev) => [...prev, { role: "user", text: question }]);
     setInput("");
@@ -95,6 +96,8 @@ export default function App() {
           member_id: activeMember.id,
           session_id: sessionId,
           client_id: clientId,
+          from_starter: fromStarter,
+          starter_topic: topic ?? null,
         }),
       });
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
@@ -161,7 +164,10 @@ export default function App() {
   }
 
   const showWelcome = messages.length === 0 && !loading;
-  const showStarters = !loading && !!activeMember?.starters?.length;
+  const showStarters = !loading && (
+    !!activeMember?.starters?.length ||
+    !!(activeMember?.topic_starters && Object.keys(activeMember.topic_starters).length)
+  );
 
   return (
     <div className="app">
@@ -290,7 +296,11 @@ export default function App() {
             )}
 
             {showStarters && (
-              <StarterQuestions starters={activeMember?.starters} onSelect={sendQuestion} />
+              <StarterQuestions
+                starters={activeMember?.starters}
+                topicStarters={activeMember?.topic_starters}
+                onSelect={sendQuestion}
+              />
             )}
             <div ref={bottomRef} />
           </div>

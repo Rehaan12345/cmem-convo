@@ -65,6 +65,8 @@ class ChatRequest(BaseModel):
     member_id: str
     session_id: str | None = None
     client_id: str | None = None
+    from_starter: bool = False
+    starter_topic: str | None = None
 
 
 class Source(BaseModel):
@@ -245,6 +247,7 @@ def list_members():
     for m in members:
         m["indexed"] = m["id"] in indexed_ids
         m["starters"] = meta.get(m["id"], {}).get("starters", [])
+        m["topic_starters"] = meta.get(m["id"], {}).get("topic_starters", {})
         m["subtitle"] = meta.get(m["id"], {}).get("subtitle", "")
     log.info("Listing %d members", len(members))
     return members
@@ -259,8 +262,34 @@ def get_member(member_id: str):
     member["indexed"] = member_id in indexed_ids
     meta = leg_meta.get_meta(member_id) or {}
     member["starters"] = meta.get("starters", [])
+    member["topic_starters"] = meta.get("topic_starters", {})
     member["subtitle"] = meta.get("subtitle", "")
     return member
+
+
+@app.get("/api/stats/starters")
+def starter_stats():
+    """Read-only validation metric: how often questions originate from a starter,
+    and which topics convert. `from_starter` is a truthy predicate that works on
+    both Postgres (boolean) and SQLite (0/1)."""
+    from sqlalchemy import text
+    from history import engine
+    with engine.connect() as conn:
+        total = conn.execute(text("SELECT COUNT(*) FROM message_sources")).scalar() or 0
+        from_starter = conn.execute(
+            text("SELECT COUNT(*) FROM message_sources WHERE from_starter")
+        ).scalar() or 0
+        by_topic = dict(conn.execute(text(
+            "SELECT starter_topic, COUNT(*) FROM message_sources "
+            "WHERE from_starter AND starter_topic IS NOT NULL "
+            "GROUP BY starter_topic"
+        )).all())
+    return {
+        "total": total,
+        "from_starter": from_starter,
+        "rate": round(from_starter / total, 3) if total else 0.0,
+        "by_topic": by_topic,
+    }
 
 
 @app.post("/api/members", response_model=MemberSeedStarted)
@@ -374,7 +403,9 @@ def chat(request: Request, response: Response, req: ChatRequest):
         )
 
     result = rag.answer_question(question, [member_id], session_id=req.session_id or None,
-                                 client_id=req.client_id or None)
+                                 client_id=req.client_id or None,
+                                 from_starter=req.from_starter,
+                                 starter_topic=req.starter_topic or None)
     log.info("Chat response: %d chars, %d sources, %d followups",
              len(result.get("answer", "")), len(result.get("sources", [])),
              len(result.get("followups", [])))
