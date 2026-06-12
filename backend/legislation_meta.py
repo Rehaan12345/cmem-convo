@@ -102,8 +102,16 @@ Below are document excerpts from the council file corpus for member ID "{member_
     "A specific question a resident could ask (answerable from these documents)",
     "Another specific question a resident could ask",
     "A fourth specific question a resident could ask"
-  ]
+  ],
+  "topic_starters": {{
+    "Topic Label": [
+      "A specific question on this topic a resident could ask (answerable from these documents)",
+      "Another specific question on this topic"
+    ]
+  }}
 }}
+
+For "topic_starters", pick 3-5 short topic labels (1-3 words each, Title Case) that reflect the main themes actually present in these documents, and give 2-3 specific resident questions per topic. Topics must come from the excerpts — do not invent themes not supported by the documents.
 
 Document excerpts:
 {context_text}"""
@@ -116,7 +124,7 @@ Document excerpts:
         try:
             response = anthropic_client.messages.create(
                 model="claude-haiku-4-5",
-                max_tokens=600,
+                max_tokens=1200,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = response.content[0].text.strip()
@@ -153,6 +161,19 @@ Document excerpts:
 
     starters = generated.get("starters", [])
     generated["starters"] = starters[:4]
+
+    # Normalize topic_starters defensively — model output is untrusted. Keep only
+    # {topic: [question, ...]} entries with a non-empty list of string questions.
+    raw_topics = generated.get("topic_starters")
+    topic_starters: dict[str, list[str]] = {}
+    if isinstance(raw_topics, dict):
+        for label, qs in raw_topics.items():
+            if not isinstance(label, str) or not isinstance(qs, list):
+                continue
+            clean = [q for q in qs if isinstance(q, str) and q.strip()][:3]
+            if clean:
+                topic_starters[label.strip()] = clean
+    generated["topic_starters"] = dict(list(topic_starters.items())[:5])
 
     with _meta_lock:
         meta = load_meta()

@@ -82,6 +82,20 @@ def _ensure_tables():
         except Exception:
             conn.rollback()  # column already exists
 
+        # Add starter-origin columns to message_sources (validation logging)
+        try:
+            conn.execute(text("ALTER TABLE message_sources ADD COLUMN from_starter BOOLEAN DEFAULT FALSE"))
+            conn.commit()
+            log.info("Migrated message_sources table: added from_starter column")
+        except Exception:
+            conn.rollback()  # column already exists
+        try:
+            conn.execute(text("ALTER TABLE message_sources ADD COLUMN starter_topic TEXT"))
+            conn.commit()
+            log.info("Migrated message_sources table: added starter_topic column")
+        except Exception:
+            conn.rollback()  # column already exists
+
         conn.commit()
     log.info("Database tables ready")
 
@@ -105,6 +119,8 @@ def save_exchange(
     followups: list[str] | None = None,
     member_id: str | None = None,
     client_id: str | None = None,
+    from_starter: bool = False,
+    starter_topic: str | None = None,
 ) -> None:
     h = get_history(session_id)
     exchange_index = len(h.messages) // 2
@@ -123,13 +139,15 @@ def save_exchange(
         conn.execute(
             text(
                 "INSERT INTO message_sources "
-                "(session_id, exchange_index, sources_json, followups_json) "
-                "VALUES (:sid, :idx, :src, :fup) "
+                "(session_id, exchange_index, sources_json, followups_json, from_starter, starter_topic) "
+                "VALUES (:sid, :idx, :src, :fup, :fromstarter, :topic) "
                 "ON CONFLICT (session_id, exchange_index) DO UPDATE SET "
-                "sources_json = EXCLUDED.sources_json, followups_json = EXCLUDED.followups_json"
+                "sources_json = EXCLUDED.sources_json, followups_json = EXCLUDED.followups_json, "
+                "from_starter = EXCLUDED.from_starter, starter_topic = EXCLUDED.starter_topic"
             ),
             {"sid": session_id, "idx": exchange_index,
-             "src": json.dumps(sources or []), "fup": json.dumps(followups or [])},
+             "src": json.dumps(sources or []), "fup": json.dumps(followups or []),
+             "fromstarter": from_starter, "topic": starter_topic},
         )
         conn.commit()
     log.info("Saved exchange for session %s (member=%s)", session_id, member_id)
