@@ -77,6 +77,22 @@ def _dedup_chunks(chunks: list[dict]) -> list[dict]:
     return out
 
 
+def _aggregation_chunks(rows: list[dict]) -> list[dict]:
+    """Turn structured aggregation rows (from citywise.get_member_legislation)
+    into pseudo-chunks so the existing citation/fact-card pipeline handles them
+    unchanged. Rows without a real document URL are dropped (no citable source)."""
+    chunks = []
+    for r in rows:
+        label = r.get("source_label")
+        if not label:
+            continue
+        date = r["start_date"].strftime("%Y-%m-%d") if r.get("start_date") else "n/a"
+        text = (f"Council file {r['cf_id']}: {r.get('name') or ''} "
+                f"(status: {r.get('status') or 'n/a'}, date: {date}).")
+        chunks.append({"text": text, "source": label})
+    return chunks
+
+
 def _cache_key(question: str, legislation: str) -> str:
     normalized = question.lower().strip()
     return hashlib.sha256(f"{legislation}:{normalized}".encode()).hexdigest()
@@ -179,53 +195,115 @@ def answer_question(
         log.info("Cache HIT — returning stored answer")
         return _answer_cache[key]
 
-    # On a follow-up, rewrite the question into a standalone query so retrieval
-    # stays on-topic ("what documents is this from?" -> the prior answer's topic).
-    search_query = question
-    if prior_messages:
-        from llm import contextualize_question
-        search_query = contextualize_question(question, prior_messages)
+    # Resolve the app member to a name + district up front so both the
+    # aggregation router and fact-card grounding can use it.
+    member_name, district = None, None
+    if leg_ids:
+        from member_registry import get_member
+        member = get_member(leg_ids[0])
+        if member:
+            member_name = member.get("name")
+            dm = re.search(r"\d+", member.get("district") or "")
+            district = int(dm.group()) if dm else None
 
-    log.info("Cache MISS — querying %d collection(s), top %d each", len(leg_ids), TOP_K)
+    # Structured intent routing: vote-record and sponsorship questions are
+    # whole-record queries vector search cannot answer (and for which the seeded
+    # collection is a tiny, skewed subset). A cheap LLM classifier decides; on a
+    # structured intent we answer from SQL (the council files become the context)
+    # and skip retrieval. Self-contained, so it runs regardless of history, and
+    # before the follow-up rewrite so it doesn't burn a contextualize call.
+    chunks: list[dict] = []
+    vote_summary: str | None = None
+    if member_name:
+        from llm import classify_question_intent
+        cls = classify_question_intent(question)
+        intent = cls["intent"]
+        if intent == "vote_record":
+            from citywise import get_member_votes, render_vote_summary
+            record = get_member_votes(member_name, district, cls["vote_values"])
+            chunks = _aggregation_chunks(record["rows"])
+            if record["counts"]:
+                vote_summary = render_vote_summary(
+                    member_name, record["counts"], cls["vote_values"], len(chunks))
+                log.info("Vote-record intent -> %d sample files (skipping vector search)",
+                         len(chunks))
+        elif intent == "sponsored":
+            from citywise import get_member_legislation
+            chunks = _aggregation_chunks(get_member_legislation(member_name, district))
+            if chunks:
+                log.info("Sponsored intent -> %d structured files (skipping vector search)",
+                         len(chunks))
+        elif intent == "nc_district":
+            # Which neighborhood councils are in / have filed CIS in this district.
+            # The active member fixes the district; answer from the geographic NC
+            # mapping (summary-only — no per-NC document to cite). Skip retrieval.
+            from citywise import get_ncs_in_district, render_nc_summary
+            nc_rows = get_ncs_in_district(district)
+            if nc_rows:
+                vote_summary = render_nc_summary(district, nc_rows)
+                log.info("NC-district intent -> %d NCs in CD%s (skipping vector search)",
+                         len(nc_rows), district)
 
-    all_results: list[tuple[float, str, dict]] = []
-    for leg in leg_ids:
-        try:
-            collection = _get_collection(leg)
-        except Exception as e:
-            log.warning("Could not load collection for '%s': %s", leg, e)
-            continue
+    if not chunks and not vote_summary:
+        # On a follow-up, rewrite the question into a standalone query so retrieval
+        # stays on-topic ("what documents is this from?" -> the prior answer's topic).
+        search_query = question
+        if prior_messages:
+            from llm import contextualize_question
+            search_query = contextualize_question(question, prior_messages)
 
-        res = collection.query(
-            query_texts=[search_query],
-            n_results=TOP_K,
-            include=["documents", "metadatas", "distances"],
-        )
-        if res["documents"] and res["documents"][0]:
-            for doc, meta, dist in zip(
-                res["documents"][0], res["metadatas"][0], res["distances"][0]
-            ):
-                all_results.append((dist, doc, meta))
+        log.info("Cache MISS — querying %d collection(s), top %d each", len(leg_ids), TOP_K)
+        all_results: list[tuple[float, str, dict]] = []
+        for leg in leg_ids:
+            try:
+                collection = _get_collection(leg)
+            except Exception as e:
+                log.warning("Could not load collection for '%s': %s", leg, e)
+                continue
 
-    all_results.sort(key=lambda x: x[0])
-    top = all_results[: TOP_K * len(leg_ids)]
+            res = collection.query(
+                query_texts=[search_query],
+                n_results=TOP_K,
+                include=["documents", "metadatas", "distances"],
+            )
+            if res["documents"] and res["documents"][0]:
+                for doc, meta, dist in zip(
+                    res["documents"][0], res["metadatas"][0], res["distances"][0]
+                ):
+                    all_results.append((dist, doc, meta))
 
-    chunks = [{"text": doc, "source": meta.get("source", "unknown")}
-              for _, doc, meta in top]
+        all_results.sort(key=lambda x: x[0])
+        top = all_results[: TOP_K * len(leg_ids)]
 
-    log.info("Retrieved %d chunks total", len(chunks))
-    for i, c in enumerate(chunks):
-        log.info("  [%d] %s — %d words", i + 1, c["source"], len(c["text"].split()))
+        chunks = [{"text": doc, "source": meta.get("source", "unknown")}
+                  for _, doc, meta in top]
 
-    # Carry the prior turn's chunks forward so follow-ups keep their grounding,
-    # then store this turn's context (bounded) for the next follow-up.
-    if session_id:
-        carried = _session_chunks.get(session_id, [])
-        chunks = _dedup_chunks(chunks + carried)[: TOP_K * len(leg_ids) + TOP_K]
-        _session_chunks[session_id] = chunks
-        log.info("Context after carry-forward: %d chunks", len(chunks))
+        log.info("Retrieved %d chunks total", len(chunks))
+        for i, c in enumerate(chunks):
+            log.info("  [%d] %s — %d words", i + 1, c["source"], len(c["text"].split()))
 
-    result = get_response(question, chunks, leg_ids, session_id=session_id)
+        # Carry the prior turn's chunks forward so follow-ups keep their grounding,
+        # then store this turn's context (bounded) for the next follow-up.
+        if session_id:
+            carried = _session_chunks.get(session_id, [])
+            chunks = _dedup_chunks(chunks + carried)[: TOP_K * len(leg_ids) + TOP_K]
+            _session_chunks[session_id] = chunks
+            log.info("Context after carry-forward: %d chunks", len(chunks))
+
+    # Structured grounding: pull verified facts (type/status/sponsors/votes) for
+    # the council files now in context so the model states them from the DB
+    # instead of guessing from PDF prose. Degrades to RAG-only if unavailable.
+    cf_ids: list[str] = []
+    for c in chunks:
+        cf = c["source"].split("/", 1)[0]
+        if cf and cf not in cf_ids:
+            cf_ids.append(cf)
+
+    from citywise import get_fact_cards
+    fact_cards = get_fact_cards(cf_ids, member_name=member_name, district=district)
+
+    result = get_response(question, chunks, leg_ids, session_id=session_id,
+                          fact_cards=fact_cards, vote_summary=vote_summary)
 
     # Normalize sources to {title, url} objects and rewrite the answer's inline
     # link hrefs (source labels) to real URLs. Tolerate bare-string sources from

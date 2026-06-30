@@ -43,15 +43,17 @@ SYSTEM_PROMPT_TEMPLATE = """You are a helpful assistant for {context}
 Your job is to help residents understand this councilmember's legislative record, policy positions, and actions — explained in plain language, like talking to a neighbor, not a lawyer.
 
 Rules:
-1. Base your answer ONLY on the document excerpts provided. Do not use outside knowledge.
-2. Cite each point inline as a markdown link with this exact format: [Short Title](source_label) — for example [Food Resources Motion](25-0381/filename.pdf). The link text must be a 2-4 word Title-Case description of the document's topic. The href must be ONLY the source label (e.g. "25-0381/filename.pdf") — no dollar amounts, no extra words, no spaces. Never put anything other than the source label in the href.
-3. If the excerpts come from multiple council files, cite each piece of information with its own inline link.
-4. If the documents don't have enough to fully answer the question:
+1. Base your answer ONLY on the material provided below — the VERIFIED RECORD block (exact structured facts from the city legislative database) and the document excerpts (text extracted from the source PDFs). Do not use outside knowledge.
+2. The VERIFIED RECORD block, when present, is authoritative. For any claim about a council file's type, status, sponsors/movers, dates, vote tally, or how THIS council member voted, use the VERIFIED RECORD and never infer those facts from the document excerpts; if the two disagree on such a fact, the VERIFIED RECORD is correct. Use the document excerpts for explanation, context, and what the legislation actually says. When the VERIFIED RECORD shows how this council member voted on a file or that they sponsored it, state that plainly. Note that a file's "Council District" is the area it concerns, which is not necessarily this council member's district.
+2a. If a "VOTE RECORD (authoritative)" line is present, it gives this council member's exact full vote totals. Lead your answer with those totals. The council files listed below it are only a SAMPLE of the matching votes, not the complete set — never imply the list is exhaustive, and say how many matched versus how many you're showing. Call out rare or notable votes explicitly (e.g. the few times they voted NO).
+3. Cite each point inline as a markdown link with this exact format: [Short Title](source_label) — for example [Food Resources Motion](25-0381/filename.pdf). The link text must be a 2-4 word Title-Case description of the document's topic. The href must be ONLY the source label (e.g. "25-0381/filename.pdf") — no dollar amounts, no extra words, no spaces. Never put anything other than the source label in the href. Cite a fact drawn from the VERIFIED RECORD using a document excerpt link for the same council file.
+4. If the excerpts come from multiple council files, cite each piece of information with its own inline link.
+5. If the documents don't have enough to fully answer the question:
    - Say clearly: "I don't know based on these documents."
    - Suggest which type of council file might have the answer.
-5. Always end your response with exactly 3 suggested follow-up questions the user could ask — questions that CAN be answered from these documents.
-6. Keep the answer concise. Default to 2 short paragraphs. Only when the user's question is broad or detailed may you use up to 3 paragraphs — never more than 3.
-7. Match the tone and complexity of your response to how the user phrased their question. If the question is casual or informal, respond conversationally and avoid jargon. If the question is formal or technical, respond with appropriate detail and precision. If the question is brief or simple, lead with a direct plain-language answer before adding context. Never adjust the factual content or citation grounding based on tone — only the framing and language level.
+6. Always end your response with exactly 3 suggested follow-up questions the user could ask — questions that CAN be answered from these documents.
+7. Keep the answer concise. Default to 2 short paragraphs. Only when the user's question is broad or detailed may you use up to 3 paragraphs — never more than 3.
+8. Match the tone and complexity of your response to how the user phrased their question. If the question is casual or informal, respond conversationally and avoid jargon. If the question is formal or technical, respond with appropriate detail and precision. If the question is brief or simple, lead with a direct plain-language answer before adding context. Never adjust the factual content or citation grounding based on tone — only the framing and language level.
 
 Format your response as JSON with this exact structure:
 {{
@@ -68,8 +70,22 @@ def _system_prompt(member_ids: list[str]) -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(context=context)
 
 
-def _build_context(chunks: list[dict]) -> str:
-    parts = [f"[Source: {c['source']}]\n{c['text']}" for c in chunks]
+def _build_context(chunks: list[dict], fact_cards: dict | None = None,
+                   vote_summary: str | None = None) -> str:
+    parts: list[str] = []
+    if vote_summary:
+        parts.append(vote_summary)
+    if fact_cards:
+        from citywise import render_fact_cards
+        cf_order: list[str] = []
+        for c in chunks:
+            cf = c["source"].split("/", 1)[0]
+            if cf not in cf_order:
+                cf_order.append(cf)
+        block = render_fact_cards(fact_cards, cf_order)
+        if block:
+            parts.append(block)
+    parts += [f"[Source: {c['source']}]\n{c['text']}" for c in chunks]
     return "\n\n---\n\n".join(parts)
 
 
@@ -103,6 +119,8 @@ def _call_claude(
     chunks: list[dict],
     member_ids: list[str],
     prior_messages: list | None = None,
+    fact_cards: dict | None = None,
+    vote_summary: str | None = None,
 ) -> dict:
     import anthropic
     prior_messages = prior_messages or []
@@ -110,7 +128,7 @@ def _call_claude(
     log.info("Calling Claude (claude-haiku-4-5) for %s%s",
              member_ids, f" (history: {len(prior_messages)//2} turns)" if has_history else "")
 
-    context = _build_context(chunks)
+    context = _build_context(chunks, fact_cards, vote_summary)
     approx_words = len(context.split()) + len(question.split())
     log.info("Prompt size: ~%d words", approx_words)
 
@@ -163,10 +181,12 @@ def _call_openai(
     chunks: list[dict],
     member_ids: list[str],
     prior_messages: list | None = None,
+    fact_cards: dict | None = None,
+    vote_summary: str | None = None,
 ) -> dict:
     prior_messages = prior_messages or []
     log.info("Calling OpenAI (gpt-4o-mini) for %s", member_ids)
-    context = _build_context(chunks)
+    context = _build_context(chunks, fact_cards, vote_summary)
     history_preamble = _format_history_for_openai(prior_messages)
     user_message = f"{history_preamble}Document excerpts:\n\n{context}\n\nQuestion: {question}"
     log.info("Prompt size: ~%d words", len(user_message.split()))
@@ -240,11 +260,75 @@ def contextualize_question(question: str, prior_messages: list) -> str:
     return rewritten
 
 
+_INTENT_PROMPT = (
+    "You classify a resident's question about an LA city council member's record so the app "
+    "can answer structured questions from a database instead of guessing from documents. "
+    "Return ONLY JSON: {\"intent\": \"vote_record\"|\"sponsored\"|\"nc_district\"|\"none\", \"vote_values\": []}.\n\n"
+    "- \"vote_record\": the question asks about the member's overall voting pattern, or every file "
+    "they voted a certain way on — e.g. 'where has he voted no', 'his voting record', 'what has she "
+    "been absent for', 'how often does he vote yes'. Set \"vote_values\" to the subset of "
+    "[\"YES\",\"NO\",\"ABSENT\"] asked about (against/oppose => NO, in favor/for => YES, "
+    "missed/didn't vote => ABSENT). Use [] when they want the whole record or don't specify.\n"
+    "- \"sponsored\": asks what the member introduced/authored/sponsored/proposed.\n"
+    "- \"nc_district\": asks which neighborhood councils (NCs), community councils, or neighborhood "
+    "groups are in / belong to / represent this district, or which have filed Community Impact "
+    "Statements (CIS) / weighed in here — e.g. 'what neighborhood councils are in my district', "
+    "'which NCs have filed CIS', 'which community councils cover this area'.\n"
+    "- \"none\": anything else, INCLUDING a question about how they voted on ONE specific bill or "
+    "topic (e.g. 'how did he vote on the hotel wage ordinance', or any question naming a file id "
+    "like 25-0599) — those are handled elsewhere.\n\n"
+    "Question: {q}"
+)
+
+
+def classify_question_intent(question: str) -> dict:
+    """Cheap LLM classification of a question into a structured-answer intent.
+
+    Returns {"intent": "vote_record"|"sponsored"|"none", "vote_values": [...]}.
+    Detection by regex is unreliable across phrasings ('where'/'how'/'his record'),
+    so a small model call does it. Any failure returns intent 'none' so the question
+    falls back to normal RAG retrieval."""
+    user_text = _INTENT_PROMPT.replace("{q}", question or "")
+    provider = os.getenv("LLM_PROVIDER", "claude").lower()
+    try:
+        if provider == "openai":
+            client = _get_openai_client()
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": user_text}],
+                max_tokens=64,
+            )
+            raw = resp.choices[0].message.content
+        else:
+            client = _get_anthropic_client()
+            resp = client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=64,
+                messages=[{"role": "user", "content": user_text}],
+            )
+            raw = resp.content[0].text
+    except Exception as e:
+        log.warning("Intent classification failed (%s); treating as 'none'", e)
+        return {"intent": "none", "vote_values": []}
+
+    parsed = _parse_llm_output(raw or "")
+    intent = parsed.get("intent")
+    if intent not in ("vote_record", "sponsored", "nc_district", "none"):
+        intent = "none"
+    valid = {"YES", "NO", "ABSENT"}
+    votes = [v.upper() for v in parsed.get("vote_values", []) if isinstance(v, str)]
+    votes = [v for v in votes if v in valid]
+    log.info("Intent: %r -> %s %s", question, intent, votes)
+    return {"intent": intent, "vote_values": votes}
+
+
 def get_response(
     question: str,
     chunks: list[dict],
     member_ids: list[str],
     session_id: str | None = None,
+    fact_cards: dict | None = None,
+    vote_summary: str | None = None,
 ) -> dict:
     from history import load_recent
 
@@ -253,8 +337,8 @@ def get_response(
     provider = os.getenv("LLM_PROVIDER", "claude").lower()
     log.info("Provider: %s", provider)
     if provider == "openai":
-        result = _call_openai(question, chunks, member_ids, prior_messages)
+        result = _call_openai(question, chunks, member_ids, prior_messages, fact_cards, vote_summary)
     else:
-        result = _call_claude(question, chunks, member_ids, prior_messages)
+        result = _call_claude(question, chunks, member_ids, prior_messages, fact_cards, vote_summary)
 
     return result

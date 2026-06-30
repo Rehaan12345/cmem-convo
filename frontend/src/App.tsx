@@ -331,6 +331,23 @@ export default function App() {
             </button>
           </div>
         </footer>
+
+        <div className="contact-bar">
+          <a
+            className="contact-link"
+            href="mailto:rehaananjaria@gmail.com"
+          >
+            Email Developer
+          </a>
+          <a
+            className="contact-link"
+            href="https://cal.com/rehaan-anjaria/30min"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Let's Talk
+          </a>
+        </div>
       </div>
 
       {showAddModal && (

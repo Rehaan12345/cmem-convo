@@ -25,7 +25,10 @@ For the engineering decisions and trade-offs, see [`TECHNICAL_BRIEF.md`](./TECHN
    a ChromaDB collection (`leg_{member_id}`).
 2. **Ask a question** — the backend retrieves the top-K relevant chunks, sends them
    plus the question to the LLM, and gets back a JSON answer with inline citations
-   and follow-ups.
+   and follow-ups. Whole-record questions (voting record, what they've sponsored, or
+   *which neighborhood councils are in / have filed Community Impact Statements in
+   the district*) are instead answered from a structured legislative database, which
+   has the complete record the vector store does not.
 3. **Read the answer** — the frontend renders the answer with clickable source
    links and a sources box, plus follow-up suggestions you can click to continue.
 

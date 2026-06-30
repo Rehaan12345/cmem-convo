@@ -34,6 +34,22 @@ their representative has done — without reading hundreds of municipal PDFs.
    `client_id` in `localStorage`); selecting one restores the conversation and
    switches to the district it belongs to.
 
+### Questions answered from structured data, not documents
+
+Some questions are about a member's *whole record* and can't be answered from a
+handful of retrieved document chunks. A cheap classifier routes these to a
+structured legislative database instead:
+
+- **Voting record** — "what has she voted no on?" → full vote totals plus notable examples.
+- **What they sponsored** — "what has he introduced?" → the member's authored files.
+- **Neighborhood councils in the district** — "which neighborhood councils are in my
+  district?" / "which have filed Community Impact Statements?" → the neighborhood
+  councils that fall within the council district (geographically), with how many
+  CIS each has filed. The district-to-neighborhood-council mapping is derived from
+  the city's official GIS boundaries; it is **not** the EmpowerLA "service region"
+  and is **not** inferred from who comments on whose files. A neighborhood council
+  can span more than one council district.
+
 ### How a member gets added (seeding)
 
 A member is seeded by uploading their council activity PDF through the "+ Add

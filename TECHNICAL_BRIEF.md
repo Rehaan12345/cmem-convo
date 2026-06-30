@@ -361,6 +361,50 @@ auth — there is none yet. The limits assume exactly one trusted proxy; the
 
 ---
 
+## 14. Structured answers from a legislative DB, and a geographically-derived NC map
+
+**Decision.** Route whole-record questions away from vector search to the read-only
+`citywise_full` Postgres (`citywise.py`). A cheap classifier
+(`llm.classify_question_intent`) labels a question `vote_record`, `sponsored`,
+`nc_district`, or `none`; the first three answer from SQL and skip retrieval.
+
+**Why.** The seeded vector store is a tiny, skewed subset of a member's record.
+"What has she voted no on?" or "which neighborhood councils are in my district?" are
+*complete-record* questions — retrieval over a partial corpus would mislead. The
+structured DB has the whole record, deterministically.
+
+**The NC→district map is the sharpest example of the guiding principle.** Residents
+ask "which neighborhood councils are in my district?" — but **no data source carries
+that mapping as a column**, and two tempting shortcuts are *demonstrably wrong*
+(validated against live data, not assumed):
+
+- `projects.council_district` is 90% NULL on Community Impact Statement (CIS) files
+  and denotes the file's subject area, not the submitting NC's location.
+- A "sponsor join" (CIS → `project_movers` → `council_members.district`) is noise:
+  across 5 NCs with known districts the argmax matched 0/5, because every NC's
+  distribution just mirrors the citywide mover ranking.
+- EmpowerLA's `SERVICE_RE` is the 12 service *regions*, a different partition than
+  the 15 council districts.
+
+So the mapping is **derived geographically**: a one-time script
+(`scripts/derive_nc_districts.py`, `shapely`) intersects the city's official
+certified-NC boundary polygons with council-district polygons and writes a
+checked-in, hand-editable CSV (`nc_council_district.csv`) with overlap fractions.
+This is deterministic and *falsifiable* — and it gets right what the sponsor-join
+got wrong (Downtown LA→CD14, Silver Lake→CD13). The heavy GIS step is offline only;
+the deployed backend just reads the resulting tables. NC names parsed from noisy CIS
+titles are matched to the canonical EmpowerLA directory by a deterministic
+normalize → curated-alias → `difflib` pipeline (~99.6% of CIS rows resolve;
+unmatched are logged for curation, never guessed).
+
+**What it costs.** One extra LLM call per message for classification (no eval set
+yet — an honest gap), a one-time GIS dependency outside the runtime, and a small
+curation surface (the unmatched-NC review CSV, the alias map). The NC answer is
+summary-only — it lists councils and CIS counts without per-item document citations,
+since these rows have no single source PDF.
+
+---
+
 ## Known gaps (be honest about these)
 
 These are real limitations, not hidden ones. Treat them as caveats before relying on
