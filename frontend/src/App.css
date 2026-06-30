@@ -274,6 +274,39 @@
   align-items: flex-end;
 }
 
+/* Contact bar pinned below the input footer, spanning the full width */
+.contact-bar {
+  display: flex;
+  flex-shrink: 0;
+  border-top: 2px solid #000;
+}
+
+.contact-link {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px 22px;
+  border: none;
+  border-radius: 0;
+  background: #2d2d2d;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  text-transform: uppercase;
+  text-decoration: none;
+  letter-spacing: 0.06em;
+  transition: background 0.15s;
+}
+
+.contact-link + .contact-link {
+  border-left: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.contact-link:hover {
+  background: #444;
+}
+
 .chat-input {
   flex: 1;
   resize: none;

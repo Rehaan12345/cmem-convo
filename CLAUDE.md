@@ -33,7 +33,7 @@ npx tsc --noEmit   # type-check only
 docker-compose up --build
 ```
 
-The `.env` file lives in `backend/`. Required vars: `ANTHROPIC_API_KEY`, optionally `OPENAI_API_KEY`, `LLM_PROVIDER` (`claude` default or `openai`), `ALLOWED_ORIGINS`, `DATABASE_URL` (Railway Postgres; falls back to SQLite), `DB_PATH`, `HISTORY_DB_PATH`, `META_PATH`.
+The `.env` file lives in `backend/`. Required vars: `ANTHROPIC_API_KEY`, optionally `OPENAI_API_KEY`, `LLM_PROVIDER` (`claude` default or `openai`), `ALLOWED_ORIGINS`, `DATABASE_URL` (Railway Postgres; falls back to SQLite), `DB_PATH`, `HISTORY_DB_PATH`, `META_PATH`, optionally `CITYWISE_DATABASE_URL` (read-only Postgres for the `citywise_full` structured legislative DB; when unset, structured fact-card grounding is disabled and answers fall back to RAG-only).
 
 ## Architecture
 
@@ -42,9 +42,11 @@ The `.env` file lives in `backend/`. Required vars: `ANTHROPIC_API_KEY`, optiona
 1. **Frontend** (`App.tsx`) POSTs `{question, member_id, session_id, client_id}` to `/api/chat`.
 2. **`rag.answer_question()`** (rag.py) — the central orchestrator:
    - Loads conversation history from SQLite/Postgres via `history.load_recent()`.
+   - **Structured intent routing:** `llm.classify_question_intent()` (a cheap LLM classifier) labels the question `vote_record`, `sponsored`, `nc_district`, or `none`. For `vote_record` it answers from `citywise.get_member_votes()` (full vote counts as source of truth + a capped, citable sample, NO votes first), for `sponsored` from `citywise.get_member_legislation()`, and for `nc_district` ("which neighborhood councils are in / have filed CIS in my district") from `citywise.get_ncs_in_district()` rendered via `render_nc_summary()` (the active member fixes the district; **summary-only — no per-NC document to cite**) — **all three skip vector retrieval**, since the seeded ChromaDB collection is a tiny, skewed subset. `none` falls through to RAG below. Any classifier error ⇒ `none`. Runs before the follow-up rewrite so a structured turn doesn't burn a `contextualize_question()` call.
    - If it's a follow-up, calls `llm.contextualize_question()` to rewrite the question into a standalone search query (so "say more" still retrieves relevant chunks).
    - Queries ChromaDB for top-K chunks across the member's collection.
    - Carries the prior turn's chunks forward and deduplicates (`_session_chunks` in-memory per session).
+   - **Structured grounding:** extracts the council-file IDs from the retrieved chunks and calls `citywise.get_fact_cards()` (read-only `citywise_full` DB) to fetch verified type/status/sponsors/vote-tally and *this council member's own vote* per file. These are rendered as an authoritative "VERIFIED RECORD" block prepended to the document context, so the model states votes/sponsors/status from the DB instead of inferring them from PDF prose. Degrades to RAG-only if `CITYWISE_DATABASE_URL` is unset/unreachable.
    - Calls `llm.get_response()` which dispatches to Claude Haiku or GPT-4o-mini.
    - Normalises the `sources` list to `{title, url}` objects and rewrites inline markdown link hrefs from source labels → real cityclerk.lacity.org PDF URLs.
    - Saves the exchange to history; caches first-turn answers in memory.
@@ -69,6 +71,11 @@ Seeding is triggered by uploading a council activity PDF through the "Add Member
 | Sources/followups per exchange | `message_sources` SQL table (session_id + exchange_index) |
 | Member registry | `members` SQL table (same DB as history) |
 | Member metadata (subtitle, starters) | `legislation_meta.json` on disk; falls back to `_SEEDS` dict in `legislation_meta.py` |
+| NC directory / NC→district / CIS engagement | Derived tables in the read-only `citywise_full` DB: `nc_directory`, `nc_council_district`, `nc_member_engagement`. Built by idempotent scripts in `backend/scripts/` (`derive_nc_districts.py`, `build_nc_directory.py`, `build_nc_engagement.py`); the app only SELECTs them via `citywise.py` |
+
+### Neighborhood-council (NC) tables
+
+These power the `nc_district` intent. No source carries neighborhood-council → council-district as a column, so it is **derived geographically**: `derive_nc_districts.py` (one-time, needs `shapely` — dev-only, never imported by the deployed backend) intersects the LA GeoHub certified-NC boundary polygons (ArcGIS layer 18) with council-district polygons (layer 13) and writes the checked-in `backend/nc_council_district.csv` (`nc_id, council_district, overlap_fraction, is_primary`; one-to-many — NCs can straddle districts). `build_nc_directory.py` loads that CSV plus `backend/neighborhood_councils_with_region.csv` (EmpowerLA export) into `nc_directory` + `nc_council_district`. `build_nc_engagement.py` aggregates Community Impact Statements (`file_activities_url.type_id=3`) ⋈ `project_movers` ⋈ `council_members`, parsing the submitting NC from the CIS title via `nc_names.parse_nc_name`/`normalize_nc_name` and resolving it to a canonical `nc_id` (normalized exact match → curated alias map → difflib; ~99.6% of CIS rows resolve, unmatched kept with `nc_id NULL` and written to `nc_engagement_unmatched.csv` for curation). **Note:** `SERVICE_RE` in the EmpowerLA CSV is the 12 EmpowerLA *service regions*, NOT the 15 council districts — never use it as the district key.
 
 ### Source label → URL convention
 
