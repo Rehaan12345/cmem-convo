@@ -8,6 +8,7 @@ from pathlib import Path
 
 import chromadb
 from chromadb.utils import embedding_functions
+from cachetools import TTLCache, LRUCache
 
 from llm import get_response
 from ingest import collection_name
@@ -17,17 +18,36 @@ log = get_logger(__name__)
 
 DB_PATH = Path(os.getenv("DB_PATH", str(Path(__file__).parent / "chroma_db")))
 TOP_K = 5
+_CITYWISE_ENABLED = bool(os.getenv("CITYWISE_DATABASE_URL"))
 
 _collections: dict = {}
-_answer_cache: dict[str, dict] = {}
+# Bounded answer cache: 256 entries, 1-hour TTL. Prevents unbounded memory growth
+# across the process lifetime without giving up the first-turn latency benefit.
+_answer_cache: TTLCache = TTLCache(maxsize=256, ttl=3600)
 _answer_cache_legs: dict[str, set] = {}
-# Most recent retrieved chunks per session, carried into follow-up turns so a
-# question about the prior answer keeps that answer's grounding in context.
-_session_chunks: dict[str, list[dict]] = {}
+# Per-session chunk carry-forward: evicts oldest sessions after 500 active sessions.
+_session_chunks: LRUCache = LRUCache(maxsize=500)
+_answer_cache_lock = threading.Lock()
+_session_chunks_lock = threading.Lock()
 
 _chroma_client: chromadb.PersistentClient | None = None
 _chroma_lock = threading.Lock()
 _collections_lock = threading.Lock()
+
+_ef: embedding_functions.SentenceTransformerEmbeddingFunction | None = None
+_ef_lock = threading.Lock()
+
+
+def get_ef() -> embedding_functions.SentenceTransformerEmbeddingFunction:
+    """Return the shared MiniLM embedding function, instantiating it once."""
+    global _ef
+    if _ef is None:
+        with _ef_lock:
+            if _ef is None:
+                _ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+                    model_name="all-MiniLM-L6-v2"
+                )
+    return _ef
 
 
 def _source_to_url(source: str) -> str:
@@ -114,11 +134,8 @@ def _get_collection(legislation: str):
         if legislation not in _collections:
             coll_name = collection_name(legislation)
             log.info("Loading ChromaDB collection '%s'", coll_name)
-            ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name="all-MiniLM-L6-v2"
-            )
             _collections[legislation] = get_chroma_client().get_collection(
-                coll_name, embedding_function=ef
+                coll_name, embedding_function=get_ef()
             )
             log.info("Loaded '%s' (%d chunks)", coll_name, _collections[legislation].count())
     return _collections[legislation]
@@ -149,8 +166,9 @@ def get_available_legislations() -> list[dict]:
 def invalidate_collection_cache(legislation: str):
     with _collections_lock:
         _collections.pop(legislation, None)
-    for key in _answer_cache_legs.pop(legislation, set()):
-        _answer_cache.pop(key, None)
+    with _answer_cache_lock:
+        for key in _answer_cache_legs.pop(legislation, set()):
+            _answer_cache.pop(key, None)
     log.info("Invalidated collection cache for '%s'", legislation)
 
 
@@ -191,9 +209,21 @@ def answer_question(
     key = _cache_key(question + "|legs:" + ",".join(leg_ids) + "|p:" + provider, "__multi__")
     use_cache = not prior_messages
 
-    if use_cache and key in _answer_cache:
-        log.info("Cache HIT — returning stored answer")
-        return _answer_cache[key]
+    if use_cache:
+        with _answer_cache_lock:
+            cached = _answer_cache.get(key)
+        if cached is not None:
+            log.info("Cache HIT — returning stored answer")
+            if session_id:
+                from history import save_exchange
+                save_exchange(session_id, question, cached.get("answer", ""),
+                              sources=cached.get("sources", []),
+                              followups=cached.get("followups", []),
+                              member_id=leg_ids[0] if leg_ids else None,
+                              client_id=client_id,
+                              from_starter=from_starter,
+                              starter_topic=starter_topic)
+            return cached
 
     # Resolve the app member to a name + district up front so both the
     # aggregation router and fact-card grounding can use it.
@@ -214,7 +244,7 @@ def answer_question(
     # before the follow-up rewrite so it doesn't burn a contextualize call.
     chunks: list[dict] = []
     vote_summary: str | None = None
-    if member_name:
+    if member_name and _CITYWISE_ENABLED:
         from llm import classify_question_intent
         cls = classify_question_intent(question)
         intent = cls["intent"]
@@ -285,9 +315,11 @@ def answer_question(
         # Carry the prior turn's chunks forward so follow-ups keep their grounding,
         # then store this turn's context (bounded) for the next follow-up.
         if session_id:
-            carried = _session_chunks.get(session_id, [])
+            with _session_chunks_lock:
+                carried = _session_chunks.get(session_id, [])
             chunks = _dedup_chunks(chunks + carried)[: TOP_K * len(leg_ids) + TOP_K]
-            _session_chunks[session_id] = chunks
+            with _session_chunks_lock:
+                _session_chunks[session_id] = chunks
             log.info("Context after carry-forward: %d chunks", len(chunks))
 
     # Structured grounding: pull verified facts (type/status/sponsors/votes) for
@@ -299,8 +331,10 @@ def answer_question(
         if cf and cf not in cf_ids:
             cf_ids.append(cf)
 
-    from citywise import get_fact_cards
-    fact_cards = get_fact_cards(cf_ids, member_name=member_name, district=district)
+    fact_cards: dict | None = None
+    if cf_ids and _CITYWISE_ENABLED:
+        from citywise import get_fact_cards
+        fact_cards = get_fact_cards(cf_ids, member_name=member_name, district=district)
 
     result = get_response(question, chunks, leg_ids, session_id=session_id,
                           fact_cards=fact_cards, vote_summary=vote_summary)
@@ -334,8 +368,9 @@ def answer_question(
                       starter_topic=starter_topic)
 
     if use_cache:
-        _answer_cache[key] = result
-        for leg in leg_ids:
-            _answer_cache_legs.setdefault(leg, set()).add(key)
+        with _answer_cache_lock:
+            _answer_cache[key] = result
+            for leg in leg_ids:
+                _answer_cache_legs.setdefault(leg, set()).add(key)
         log.info("Answer cached (cache size: %d)", len(_answer_cache))
     return result

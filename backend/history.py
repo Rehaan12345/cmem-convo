@@ -96,6 +96,9 @@ def _ensure_tables():
         except Exception:
             conn.rollback()  # column already exists
 
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_client_id ON sessions(client_id)"
+        ))
         conn.commit()
     log.info("Database tables ready")
 

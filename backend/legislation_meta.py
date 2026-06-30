@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 
 import anthropic
-from chromadb.utils import embedding_functions
 
 from logger import get_logger
 
@@ -56,8 +55,10 @@ def load_meta() -> dict:
 
 
 def save_meta(meta: dict):
-    with open(META_PATH, "w") as f:
+    tmp = META_PATH.with_suffix(".json.tmp")
+    with open(tmp, "w") as f:
         json.dump(meta, f, indent=2)
+    os.replace(tmp, META_PATH)
     log.info("Saved %s (%d entries)", META_PATH, len(meta))
 
 
@@ -69,11 +70,10 @@ def generate_and_save_meta(member_id: str) -> dict:
     from ingest import collection_name
     log.info("Generating metadata for '%s'...", member_id)
 
-    ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-    from rag import get_chroma_client
+    from rag import get_chroma_client, get_ef
     client = get_chroma_client()
     try:
-        collection = client.get_collection(collection_name(member_id), embedding_function=ef)
+        collection = client.get_collection(collection_name(member_id), embedding_function=get_ef())
     except Exception as e:
         log.error("Could not load collection for '%s': %s", member_id, e)
         return {}
