@@ -2,6 +2,7 @@ import asyncio
 import io
 import os
 import re
+import time
 import uuid
 
 import pdfplumber
@@ -9,7 +10,6 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, F
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from chromadb.utils import embedding_functions
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -100,15 +100,15 @@ async def _run_indexing(
     files_list: list[dict],
     seed_log,
 ) -> None:
-    """Wipe + recreate ChromaDB collection, download + index all files, generate metadata."""
+    """Download + index all files into the member's ChromaDB collection (idempotent:
+    already-indexed council files are skipped), then generate metadata."""
     job = seed_jobs[job_id]
     file_ids = [f["id"] for f in files_list]
     total = len(file_ids)
 
-    ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
     client = rag.get_chroma_client()
     coll_name = collection_name(member_id)
-    collection = client.get_or_create_collection(coll_name, embedding_function=ef)
+    collection = client.get_or_create_collection(coll_name, embedding_function=rag.get_ef())
     seed_log.info("Using collection '%s' (%d existing chunks)", coll_name, collection.count())
 
     completed = 0
@@ -322,6 +322,7 @@ async def create_member(
         "member_id": member_id,
         "status": "parsing",
         "message": f"Starting seed for {member_id}...",
+        "created_at": time.time(),
     }
     log.info("Seed job %s started for member '%s' (%s)", job_id, member_id, name)
 
@@ -331,11 +332,17 @@ async def create_member(
 
 @app.get("/api/members/{member_id}/status", response_model=MemberSeedStatus)
 def member_seed_status(member_id: str):
-    # Find the most recent job for this member
+    # Prune completed/error jobs older than 24 h to cap seed_jobs size
+    cutoff = time.time() - 86400
+    stale = [jid for jid, j in seed_jobs.items()
+             if j.get("status") in ("done", "error") and j.get("created_at", 0) < cutoff]
+    for jid in stale:
+        del seed_jobs[jid]
+
     matching = [j for j in seed_jobs.values() if j["member_id"] == member_id]
     if not matching:
         raise HTTPException(status_code=404, detail=f"No seed job found for '{member_id}'")
-    job = max(matching, key=lambda j: j["job_id"])
+    job = max(matching, key=lambda j: j.get("created_at", 0))
     return MemberSeedStatus(**job)
 
 
@@ -373,6 +380,7 @@ async def reseed_member(request: Request, response: Response, member_id: str, ba
         "member_id": member_id,
         "status": "indexing",
         "message": f"Starting reseed for {member_id}...",
+        "created_at": time.time(),
     }
     log.info("Reseed job %s started for member '%s'", job_id, member_id)
     background_tasks.add_task(_run_member_reseed, job_id, member_id)
